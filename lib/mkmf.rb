@@ -943,10 +943,10 @@ SRC
     a = r = nil
     Logging::postpone do
       r = yield
-      a = (fmt ? "#{fmt % r}" : r ? "yes" : "no") << "\n"
-      "#{f}#{m}-------------------- #{a}\n"
+      a = (fmt ? "#{fmt % r}" : r ? "yes" : "no")
+      "#{f}#{m}-------------------- #{a}\n\n"
     end
-    message(a)
+    message "%s\n", a
     Logging::message "--------------------\n\n"
     r
   end
@@ -2306,7 +2306,7 @@ CLEANOBJS     = *.#{$OBJEXT} #{config_string('cleanobjs') {|t| t.gsub(/\$\*/, "$
     mfile.puts(conf)
     mfile.print "
 all:    #{$extout ? "install" : target ? "$(DLLIB)" : "Makefile"}
-static: #{$extmk && !$static ? "all" : "$(STATIC_LIB)#{!$extmk ? " install-rb" : ""}"}
+static: #{$extmk && !$static ? "all" : "$(STATIC_LIB)#{$extout ? " install-rb" : ""}"}
 .PHONY: all install static install-so install-rb
 .PHONY: clean clean-so clean-static clean-rb
 " #"

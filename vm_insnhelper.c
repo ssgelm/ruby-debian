@@ -2,7 +2,7 @@
 
   vm_insnhelper.c - instruction helper functions.
 
-  $Author: nobu $
+  $Author$
 
   Copyright (C) 2007 Koichi Sasada
 
@@ -22,17 +22,17 @@
 static rb_control_frame_t *vm_get_ruby_level_caller_cfp(const rb_thread_t *th, const rb_control_frame_t *cfp);
 
 VALUE
-ruby_vm_sysstack_error_copy(void)
+ruby_vm_special_exception_copy(VALUE exc)
 {
-    VALUE e = rb_obj_alloc(rb_eSysStackError);
-    rb_obj_copy_ivar(e, sysstack_error);
+    VALUE e = rb_obj_alloc(rb_class_real(RBASIC_CLASS(exc)));
+    rb_obj_copy_ivar(e, exc);
     return e;
 }
 
 static void
 vm_stackoverflow(void)
 {
-    rb_exc_raise(ruby_vm_sysstack_error_copy());
+    rb_exc_raise(ruby_vm_special_exception_copy(sysstack_error));
 }
 
 #if VM_CHECK_MODE > 0
@@ -1039,13 +1039,13 @@ vm_throw_start(rb_thread_t *const th, rb_control_frame_t *const reg_cfp, enum ru
 
 	    while (escape_cfp < eocfp) {
 		if (escape_cfp->ep == ep) {
-		    const VALUE epc = escape_cfp->pc - escape_cfp->iseq->body->iseq_encoded;
-		    const rb_iseq_t * const iseq = escape_cfp->iseq;
-		    const struct iseq_catch_table * const ct = iseq->body->catch_table;
-		    const int ct_size = ct->size;
-		    int i;
+		    const rb_iseq_t *const iseq = escape_cfp->iseq;
+		    const VALUE epc = escape_cfp->pc - iseq->body->iseq_encoded;
+		    const struct iseq_catch_table *const ct = iseq->body->catch_table;
+		    unsigned int i;
 
-		    for (i=0; i<ct_size; i++) {
+		    if (!ct) break;
+		    for (i=0; i < ct->size; i++) {
 			const struct iseq_catch_table_entry * const entry = &ct->entries[i];
 
 			if (entry->type == CATCH_TYPE_BREAK && entry->start < epc && entry->end >= epc) {
@@ -1080,6 +1080,7 @@ vm_throw_start(rb_thread_t *const th, rb_control_frame_t *const reg_cfp, enum ru
 	const VALUE *current_ep = GET_EP();
 	const VALUE *target_lep = VM_EP_LEP(current_ep);
 	int in_class_frame = 0;
+	int toplevel = 1;
 	escape_cfp = reg_cfp;
 
 	while (escape_cfp < eocfp) {
@@ -1098,6 +1099,7 @@ vm_throw_start(rb_thread_t *const th, rb_control_frame_t *const reg_cfp, enum ru
 
 	    if (lep == target_lep) {
 		if (VM_FRAME_TYPE(escape_cfp) == VM_FRAME_MAGIC_LAMBDA) {
+		    toplevel = 0;
 		    if (in_class_frame) {
 			/* lambda {class A; ... return ...; end} */
 			goto valid_return;
@@ -1112,6 +1114,20 @@ vm_throw_start(rb_thread_t *const th, rb_control_frame_t *const reg_cfp, enum ru
 			    }
 			    tep = VM_ENV_PREV_EP(tep);
 			}
+		    }
+		}
+		else if (VM_FRAME_RUBYFRAME_P(escape_cfp)) {
+		    switch (escape_cfp->iseq->body->type) {
+		      case ISEQ_TYPE_TOP:
+		      case ISEQ_TYPE_MAIN:
+			if (toplevel) goto valid_return;
+			break;
+		      case ISEQ_TYPE_EVAL:
+		      case ISEQ_TYPE_CLASS:
+			toplevel = 0;
+			break;
+		      default:
+			break;
 		    }
 		}
 	    }
@@ -1538,8 +1554,6 @@ vm_call_iseq_setup_tailcall(rb_thread_t *th, rb_control_frame_t *cfp, struct rb_
     vm_pop_frame(th, cfp, cfp->ep);
     cfp = th->cfp;
 
-    RUBY_VM_CHECK_INTS(th);
-
     sp_orig = sp = cfp->sp;
 
     /* push self */
@@ -1558,6 +1572,8 @@ vm_call_iseq_setup_tailcall(rb_thread_t *th, rb_control_frame_t *cfp, struct rb_
 		  iseq->body->stack_max);
 
     cfp->sp = sp_orig;
+    RUBY_VM_CHECK_INTS(th);
+
     return Qundef;
 }
 
@@ -2026,7 +2042,8 @@ vm_call_zsuper(rb_thread_t *th, rb_control_frame_t *cfp, struct rb_calling_info 
     if (!cc->me) {
 	return vm_call_method_nome(th, cfp, calling, ci, cc);
     }
-    if (cc->me->def->type == VM_METHOD_TYPE_REFINED) {
+    if (cc->me->def->type == VM_METHOD_TYPE_REFINED &&
+	cc->me->def->body.refined.orig_me) {
 	cc->me = refined_method_callable_without_refinement(cc->me);
     }
     return vm_call_method_each_type(th, cfp, calling, ci, cc);
@@ -2520,12 +2537,6 @@ vm_callee_setup_block_arg(rb_thread_t *th, struct rb_calling_info *calling, cons
 		else if (calling->argc > iseq->body->param.lead_num) {
 		    calling->argc = iseq->body->param.lead_num; /* simply truncate arguments */
 		}
-	    }
-	    else if (arg_setup_type == arg_setup_lambda &&
-		     calling->argc == 1 &&
-		     !NIL_P(arg0 = vm_callee_setup_block_arg_arg0_check(argv)) &&
-		     RARRAY_LEN(arg0) == iseq->body->param.lead_num) {
-		calling->argc = vm_callee_setup_block_arg_arg0_splat(cfp, iseq, argv, arg0);
 	    }
 	    else {
 		argument_arity_error(th, iseq, calling->argc, iseq->body->param.lead_num, iseq->body->param.lead_num);

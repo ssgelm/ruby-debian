@@ -71,9 +71,6 @@
 # of these properties compared to using a Hash or a Struct.
 #
 class OpenStruct
-  class << self # :nodoc:
-    alias allocate new
-  end
 
   #
   # Creates a new OpenStruct object.  By default, the resulting OpenStruct
@@ -130,6 +127,7 @@ class OpenStruct
   def each_pair
     return to_enum(__method__) { @table.size } unless block_given?
     @table.each_pair{|p| yield p}
+    self
   end
 
   #
@@ -190,7 +188,7 @@ class OpenStruct
 
   def respond_to_missing?(mid, include_private = false)
     mname = mid.to_s.chomp("=").to_sym
-    @table.key?(mname) || super
+    @table&.key?(mname) || super
   end
 
   def method_missing(mid, *args) # :nodoc:

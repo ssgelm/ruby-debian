@@ -330,8 +330,6 @@ ntz_intptr(uintptr_t x)
 VALUE rb_int128t2big(int128_t n);
 #endif
 
-#define ST2FIX(h) LONG2FIX((long)(h))
-
 
 /* arguments must be Fixnum */
 static inline VALUE
@@ -776,6 +774,8 @@ struct vm_svar {
 
 /* THROW_DATA */
 
+#define THROW_DATA_CONSUMED IMEMO_FL_USER0
+
 struct vm_throw_data {
     VALUE flags;
     VALUE reserved;
@@ -784,19 +784,34 @@ struct vm_throw_data {
     VALUE throw_state;
 };
 
-#define THROW_DATA_P(err) RB_TYPE_P((err), T_IMEMO)
+#define THROW_DATA_P(err) RB_TYPE_P(((VALUE)err), T_IMEMO)
 
 /* IFUNC */
+
+struct vm_ifunc_argc {
+#if SIZEOF_INT * 2 > SIZEOF_VALUE
+    int min: (SIZEOF_VALUE * CHAR_BIT) / 2;
+    int max: (SIZEOF_VALUE * CHAR_BIT) / 2;
+#else
+    int min, max;
+#endif
+};
 
 struct vm_ifunc {
     VALUE flags;
     VALUE reserved;
     VALUE (*func)(ANYARGS);
     const void *data;
-    ID id;
+    struct vm_ifunc_argc argc;
 };
 
 #define IFUNC_NEW(a, b, c) ((struct vm_ifunc *)rb_imemo_new(imemo_ifunc, (VALUE)(a), (VALUE)(b), (VALUE)(c), 0))
+struct vm_ifunc *rb_vm_ifunc_new(VALUE (*func)(ANYARGS), const void *data, int min_argc, int max_argc);
+static inline struct vm_ifunc *
+rb_vm_ifunc_proc_new(VALUE (*func)(ANYARGS), const void *data)
+{
+    return rb_vm_ifunc_new(func, data, 0, UNLIMITED_ARGUMENTS);
+}
 
 /* MEMO */
 
@@ -1098,6 +1113,7 @@ long rb_objid_hash(st_index_t index);
 long rb_dbl_long_hash(double d);
 st_table *rb_init_identtable(void);
 st_table *rb_init_identtable_with_size(st_index_t size);
+VALUE rb_hash_compare_by_id_p(VALUE hash);
 
 #define RHASH_TBL_RAW(h) rb_hash_tbl_raw(h)
 VALUE rb_hash_keys(VALUE hash);
@@ -1332,8 +1348,9 @@ ID rb_id_attrget(ID id);
 VALUE rb_proc_location(VALUE self);
 st_index_t rb_hash_proc(st_index_t hash, VALUE proc);
 int rb_block_arity(void);
+int rb_block_min_max_arity(int *max);
 VALUE rb_func_proc_new(rb_block_call_func_t func, VALUE val);
-VALUE rb_func_lambda_new(rb_block_call_func_t func, VALUE val);
+VALUE rb_func_lambda_new(rb_block_call_func_t func, VALUE val, int min_argc, int max_argc);
 
 /* process.c */
 #define RB_MAX_GROUPS (65536)
@@ -1423,7 +1440,6 @@ VALUE rb_strftime(const char *format, size_t format_len, rb_encoding *enc,
 #endif
 
 /* string.c */
-void Init_frozen_strings(void);
 VALUE rb_fstring(VALUE);
 VALUE rb_fstring_new(const char *ptr, long len);
 #define rb_fstring_lit(str) rb_fstring_new((str), rb_strlen_lit(str))
@@ -1458,6 +1474,8 @@ VALUE rb_id_quote_unprintable(ID);
 char *rb_str_fill_terminator(VALUE str, const int termlen);
 void rb_str_change_terminator_length(VALUE str, const int oldtermlen, const int termlen);
 VALUE rb_str_locktmp_ensure(VALUE str, VALUE (*func)(VALUE), VALUE arg);
+VALUE rb_str_tmp_frozen_acquire(VALUE str);
+void rb_str_tmp_frozen_release(VALUE str, VALUE tmp);
 VALUE rb_str_chomp_string(VALUE str, VALUE chomp);
 #ifdef RUBY_ENCODING_H
 VALUE rb_external_str_with_enc(VALUE str, rb_encoding *eenc);
@@ -1573,7 +1591,7 @@ void rb_vm_pop_cfunc_frame(void);
 int rb_vm_add_root_module(ID id, VALUE module);
 void rb_vm_check_redefinition_by_prepend(VALUE klass);
 VALUE rb_yield_refine_block(VALUE refinement, VALUE refinements);
-VALUE ruby_vm_sysstack_error_copy(void);
+VALUE ruby_vm_special_exception_copy(VALUE);
 PUREFUNC(st_table *rb_vm_fstring_table(void));
 
 
@@ -1590,6 +1608,10 @@ VALUE rb_check_funcall_with_hook(VALUE recv, ID mid, int argc, const VALUE *argv
 VALUE rb_check_funcall_default(VALUE, ID, int, const VALUE *, VALUE);
 VALUE rb_catch_protect(VALUE t, rb_block_call_func *func, VALUE data, int *stateptr);
 VALUE rb_yield_1(VALUE val);
+VALUE rb_yield_lambda(VALUE values);
+VALUE rb_lambda_call(VALUE obj, ID mid, int argc, const VALUE *argv,
+		     rb_block_call_func_t bl_proc, int min_argc, int max_argc,
+		     VALUE data2);
 
 /* vm_insnhelper.c */
 VALUE rb_equal_opt(VALUE obj1, VALUE obj2);
@@ -1682,6 +1704,7 @@ VALUE rb_execarg_extract_options(VALUE execarg_obj, VALUE opthash);
 void rb_execarg_setenv(VALUE execarg_obj, VALUE env);
 
 /* rational.c (export) */
+VALUE rb_gcd(VALUE x, VALUE y);
 VALUE rb_gcd_normal(VALUE self, VALUE other);
 #if defined(HAVE_LIBGMP) && defined(HAVE_GMP_H)
 VALUE rb_gcd_gmp(VALUE x, VALUE y);
