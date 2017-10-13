@@ -2,7 +2,7 @@
 
   variable.c -
 
-  $Author: tenderlove $
+  $Author$
   created at: Tue Apr 19 23:55:15 JST 1994
 
   Copyright (C) 1993-2007 Yukihiro Matsumoto
@@ -2034,6 +2034,17 @@ check_autoload_required(VALUE mod, ID id, const char **loadingpath)
     if (!RSTRING_LEN(file) || !*RSTRING_PTR(file)) {
 	rb_raise(rb_eArgError, "empty file name");
     }
+
+    /*
+     * if somebody else is autoloading, we MUST wait for them, since
+     * rb_provide_feature can provide a feature before autoload_const_set
+     * completes.  We must wait until autoload_const_set finishes in
+     * the other thread.
+     */
+    if (ele->state && ele->state->thread != rb_thread_current()) {
+	return load;
+    }
+
     loading = RSTRING_PTR(file);
     safe = rb_safe_level();
     rb_set_safe_level_force(0);
@@ -2142,7 +2153,7 @@ autoload_reset(VALUE arg)
 	    VALUE th = cur->thread;
 
 	    cur->thread = Qfalse;
-	    list_del(&cur->waitq.node);
+	    list_del_init(&cur->waitq.node); /* idempotent */
 
 	    /*
 	     * cur is stored on the stack of cur->waiting_th,
@@ -2153,6 +2164,34 @@ autoload_reset(VALUE arg)
     }
 
     return 0;			/* ignored */
+}
+
+static VALUE
+autoload_sleep(VALUE arg)
+{
+    struct autoload_state *state = (struct autoload_state *)arg;
+
+    /*
+     * autoload_reset in other thread will resume us and remove us
+     * from the waitq list
+     */
+    do {
+	rb_thread_sleep_deadly();
+    } while (state->thread != Qfalse);
+
+    return Qfalse;
+}
+
+static VALUE
+autoload_sleep_done(VALUE arg)
+{
+    struct autoload_state *state = (struct autoload_state *)arg;
+
+    if (state->thread != Qfalse && rb_thread_to_be_killed(state->thread)) {
+	list_del_init(&state->waitq.node); /* idempotent */
+    }
+
+    return Qfalse;
 }
 
 VALUE
@@ -2192,13 +2231,9 @@ rb_autoload_load(VALUE mod, ID id)
     }
     else {
 	list_add_tail(&ele->state->waitq.head, &state.waitq.node);
-	/*
-	 * autoload_reset in other thread will resume us and remove us
-	 * from the waitq list
-	 */
-	do {
-	    rb_thread_sleep_deadly();
-	} while (state.thread != Qfalse);
+
+	rb_ensure(autoload_sleep, (VALUE)&state,
+		autoload_sleep_done, (VALUE)&state);
     }
 
     /* autoload_data_i can be deleted by another thread while require */
@@ -2608,7 +2643,27 @@ rb_const_set(VALUE klass, ID id, VALUE val)
      * and avoid order-dependency on const_tbl
      */
     if (rb_cObject && (RB_TYPE_P(val, T_MODULE) || RB_TYPE_P(val, T_CLASS))) {
-	rb_class_name(val);
+	if (NIL_P(rb_class_path_cached(val))) {
+	    if (klass == rb_cObject) {
+		rb_ivar_set(val, classpath, rb_id2str(id));
+		rb_name_class(val, id);
+	    }
+	    else {
+		VALUE path;
+		ID pathid;
+		st_data_t n;
+		st_table *ivtbl = RCLASS_IV_TBL(klass);
+		if (ivtbl &&
+		    (st_lookup(ivtbl, (st_data_t)(pathid = classpath), &n) ||
+		     st_lookup(ivtbl, (st_data_t)(pathid = tmp_classpath), &n))) {
+		    path = rb_str_dup((VALUE)n);
+		    rb_str_append(rb_str_cat2(path, "::"), rb_id2str(id));
+		    OBJ_FREEZE(path);
+		    rb_ivar_set(val, pathid, path);
+		    rb_name_class(val, id);
+		}
+	    }
+	}
     }
 }
 
@@ -2656,7 +2711,8 @@ const_tbl_update(struct autoload_const_set_args *args)
 	}
 	rb_clear_constant_cache();
 	setup_const_entry(ce, klass, val, visibility);
-    } else {
+    }
+    else {
 	rb_clear_constant_cache();
 
 	ce = ZALLOC(rb_const_entry_t);

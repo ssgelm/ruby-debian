@@ -2,7 +2,7 @@
 
   string.c -
 
-  $Author: nobu $
+  $Author$
   created at: Mon Aug  9 17:12:58 JST 1993
 
   Copyright (C) 1993-2007 Yukihiro Matsumoto
@@ -70,6 +70,7 @@ VALUE rb_cSymbol;
  * 1:     RSTRING_NOEMBED
  * 2:     STR_SHARED (== ELTS_SHARED)
  * 2-6:   RSTRING_EMBED_LEN (5 bits == 32)
+ * 6:     STR_IS_SHARED_M (shared, when RSTRING_NOEMBED==1 && klass==0)
  * 7:     STR_TMPLOCK
  * 8-9:   ENC_CODERANGE (2 bits)
  * 10-16: ENCODING (7 bits == 128)
@@ -79,6 +80,7 @@ VALUE rb_cSymbol;
  */
 
 #define RUBY_MAX_CHAR_LEN 16
+#define STR_IS_SHARED_M FL_USER6
 #define STR_TMPLOCK FL_USER7
 #define STR_NOFREE FL_USER18
 #define STR_FAKESTR FL_USER19
@@ -150,6 +152,8 @@ VALUE rb_cSymbol;
     if (!FL_TEST(str, STR_FAKESTR)) { \
 	RB_OBJ_WRITE((str), &RSTRING(str)->as.heap.aux.shared, (shared_str)); \
 	FL_SET((str), STR_SHARED); \
+	if (RBASIC_CLASS((shared_str)) == 0) /* for CoW-friendliness */ \
+	    FL_SET_RAW((shared_str), STR_IS_SHARED_M); \
     } \
 } while (0)
 
@@ -1127,6 +1131,45 @@ rb_str_new_frozen(VALUE orig)
     return str;
 }
 
+VALUE
+rb_str_tmp_frozen_acquire(VALUE orig)
+{
+    VALUE tmp;
+
+    if (OBJ_FROZEN_RAW(orig)) return orig;
+
+    tmp = str_new_frozen(0, orig);
+    OBJ_INFECT(tmp, orig);
+
+    return tmp;
+}
+
+void
+rb_str_tmp_frozen_release(VALUE orig, VALUE tmp)
+{
+    if (RBASIC_CLASS(tmp) != 0)
+	return;
+
+    if (STR_EMBED_P(tmp)) {
+	assert(OBJ_FROZEN_RAW(tmp));
+	rb_gc_force_recycle(tmp);
+    }
+    else if (FL_TEST_RAW(orig, STR_SHARED) &&
+	    !FL_TEST_RAW(orig, STR_TMPLOCK|RUBY_FL_FREEZE)) {
+	VALUE shared = RSTRING(orig)->as.heap.aux.shared;
+
+	if (shared == tmp && !FL_TEST_RAW(tmp, STR_IS_SHARED_M)) {
+	    FL_UNSET_RAW(orig, STR_SHARED);
+	    assert(RSTRING(orig)->as.heap.ptr == RSTRING(tmp)->as.heap.ptr);
+	    assert(RSTRING(orig)->as.heap.len == RSTRING(tmp)->as.heap.len);
+	    RSTRING(orig)->as.heap.aux.capa = RSTRING(tmp)->as.heap.aux.capa;
+	    RBASIC(orig)->flags |= RBASIC(tmp)->flags & STR_NOFREE;
+	    assert(OBJ_FROZEN_RAW(tmp));
+	    rb_gc_force_recycle(tmp);
+	}
+    }
+}
+
 static VALUE
 str_new_frozen(VALUE klass, VALUE orig)
 {
@@ -1152,6 +1195,8 @@ str_new_frozen(VALUE klass, VALUE orig)
 		RSTRING(str)->as.heap.len -= ofs + rest;
 	    }
 	    else {
+		if (RBASIC_CLASS(shared) == 0)
+		    FL_SET_RAW(shared, STR_IS_SHARED_M);
 		return shared;
 	    }
 	}
@@ -1171,6 +1216,8 @@ str_new_frozen(VALUE klass, VALUE orig)
 	    RBASIC(str)->flags |= RBASIC(orig)->flags & STR_NOFREE;
 	    RBASIC(orig)->flags &= ~STR_NOFREE;
 	    STR_SET_SHARED(orig, str);
+	    if (klass == 0)
+		FL_UNSET_RAW(str, STR_IS_SHARED_M);
 	}
     }
 
@@ -2055,11 +2102,11 @@ str_fill_term(VALUE str, char *s, long len, int termlen)
 void
 rb_str_change_terminator_length(VALUE str, const int oldtermlen, const int termlen)
 {
-    long capa = str_capacity(str, oldtermlen);
+    long capa = str_capacity(str, oldtermlen) + oldtermlen;
     long len = RSTRING_LEN(str);
 
     assert(capa >= len);
-    if (capa - len < termlen - oldtermlen) {
+    if (capa - len < termlen) {
 	rb_check_lockedtmp(str);
 	str_make_independent_expand(str, len, 0L, termlen);
     }
@@ -2071,7 +2118,7 @@ rb_str_change_terminator_length(VALUE str, const int oldtermlen, const int terml
 	if (!STR_EMBED_P(str)) {
 	    /* modify capa instead of realloc */
 	    assert(!FL_TEST((str), STR_SHARED));
-	    RSTRING(str)->as.heap.aux.capa = capa - (termlen - oldtermlen);
+	    RSTRING(str)->as.heap.aux.capa = capa - termlen;
 	}
 	if (termlen > oldtermlen) {
 	    TERM_FILL(RSTRING_PTR(str) + len, termlen);
@@ -2316,7 +2363,7 @@ rb_str_subpos(VALUE str, long beg, long *lenp)
 	    beg += blen;
 	    if (beg < 0) return 0;
 	}
-	if (beg + len > blen)
+	if (len > blen - beg)
 	    len = blen - beg;
 	if (len < 0) return 0;
 	p = s + beg;
@@ -2798,6 +2845,9 @@ rb_str_concat_literals(size_t num, const VALUE *strary)
 }
 
 /*
+ *  Document-method: String#<<
+ *  Document-method: String#concat
+ *
  *  call-seq:
  *     str << integer                      -> str
  *     str.concat(integer1, integer2,...)  -> str
@@ -2812,7 +2862,7 @@ rb_str_concat_literals(size_t num, const VALUE *strary)
  *     a = "hello "
  *     a << "world"   #=> "hello world"
  *     a.concat(33)   #=> "hello world!"
- *     a              #=> "hollo world!"
+ *     a              #=> "hello world!"
  *
  *     b = "sn"
  *     b.concat(b, b)    #=> "snsnsn"
@@ -3043,9 +3093,7 @@ str_eql(const VALUE str1, const VALUE str2)
  *     str == obj    -> true or false
  *     str === obj   -> true or false
  *
- *  === Equality
- *
- *  Returns whether +str+ == +obj+, similar to Object#==.
+ *  Equality---Returns whether +str+ == +obj+, similar to Object#==.
  *
  *  If +obj+ is not an instance of String but responds to +to_str+, then the
  *  two strings are compared using <code>obj.==</code>.
@@ -3493,10 +3541,8 @@ rb_str_rindex_m(int argc, VALUE *argv, VALUE str)
 	pos = str_offset(RSTRING_PTR(str), RSTRING_END(str), pos,
 			 enc, single_byte_optimizable(str));
 
-	if (!RREGEXP_PTR(sub) || RREGEXP_SRC_LEN(sub)) {
-	    pos = rb_reg_search(sub, str, pos, 1);
-	    pos = rb_str_sublen(str, pos);
-	}
+	pos = rb_reg_search(sub, str, pos, 1);
+	pos = rb_str_sublen(str, pos);
 	if (pos >= 0) return LONG2NUM(pos);
 	break;
 
@@ -4366,12 +4412,14 @@ rb_str_update(VALUE str, long beg, long len, VALUE val)
 	rb_raise(rb_eIndexError, "index %ld out of string", beg);
     }
     if (beg < 0) {
-	if (-beg > slen) {
+	if (beg + slen < 0) {
 	    goto out_of_range;
 	}
 	beg += slen;
     }
-    if (slen < len || slen < beg + len) {
+    assert(beg >= 0);
+    assert(beg <= slen);
+    if (len > slen - beg) {
 	len = slen - beg;
     }
     str_modify_keep_cr(str);
@@ -5185,7 +5233,7 @@ str_byte_substr(VALUE str, long beg, long len, int empty)
 	beg += n;
 	if (beg < 0) return Qnil;
     }
-    if (beg + len > n)
+    if (len > n - beg)
 	len = n - beg;
     if (len <= 0) {
 	if (!empty) return Qnil;
@@ -5195,7 +5243,7 @@ str_byte_substr(VALUE str, long beg, long len, int empty)
     else
 	p = s + beg;
 
-    if (!STR_EMBEDDABLE_P(len, TERM_LEN(str) && SHARABLE_SUBSTRING_P(beg, len, n))) {
+    if (!STR_EMBEDDABLE_P(len, TERM_LEN(str)) && SHARABLE_SUBSTRING_P(beg, len, n)) {
 	str2 = rb_str_new_frozen(str);
 	str2 = str_new_shared(rb_obj_class(str2), str2);
 	RSTRING(str2)->as.heap.ptr += beg;
@@ -5716,7 +5764,7 @@ rb_str_inspect(VALUE str)
  *  Produces a version of +str+ with all non-printing characters replaced by
  *  <code>\nnn</code> notation and all special characters escaped.
  *
- *    "hello \n ''".dump  #=> "\"hello \\n ''\"
+ *    "hello \n ''".dump  #=> "\"hello \\n ''\""
  */
 
 VALUE
@@ -6054,7 +6102,7 @@ rb_str_upcase_bang(int argc, VALUE *argv, VALUE str)
     str_modify_keep_cr(str);
     enc = STR_ENC_GET(str);
     rb_str_check_dummy_enc(enc);
-    if ((flags&ONIGENC_CASE_ASCII_ONLY) && (enc==rb_utf8_encoding() || rb_enc_mbmaxlen(enc)==1)
+    if (((flags&ONIGENC_CASE_ASCII_ONLY) && (enc==rb_utf8_encoding() || rb_enc_mbmaxlen(enc)==1))
 	|| (!(flags&ONIGENC_CASE_FOLD_TURKISH_AZERI) && ENC_CODERANGE(str)==ENC_CODERANGE_7BIT)) {
         char *s = RSTRING_PTR(str), *send = RSTRING_END(str);
 
@@ -6120,7 +6168,7 @@ rb_str_downcase_bang(int argc, VALUE *argv, VALUE str)
     str_modify_keep_cr(str);
     enc = STR_ENC_GET(str);
     rb_str_check_dummy_enc(enc);
-    if ((flags&ONIGENC_CASE_ASCII_ONLY) && (enc==rb_utf8_encoding() || rb_enc_mbmaxlen(enc)==1)
+    if (((flags&ONIGENC_CASE_ASCII_ONLY) && (enc==rb_utf8_encoding() || rb_enc_mbmaxlen(enc)==1))
 	|| (!(flags&ONIGENC_CASE_FOLD_TURKISH_AZERI) && ENC_CODERANGE(str)==ENC_CODERANGE_7BIT)) {
         char *s = RSTRING_PTR(str), *send = RSTRING_END(str);
 
@@ -7140,7 +7188,7 @@ static const char isspacetable[256] = {
 
 /*
  *  call-seq:
- *     str.split(pattern=nil, [limit])   -> anArray
+ *     str.split(pattern=nil, [limit])   -> an_array
  *
  *  Divides <i>str</i> into substrings based on a delimiter, returning an array
  *  of these substrings.
@@ -7160,9 +7208,11 @@ static const char isspacetable[256] = {
  *  split on whitespace as if ' ' were specified.
  *
  *  If the <i>limit</i> parameter is omitted, trailing null fields are
- *  suppressed. If <i>limit</i> is a positive number, at most that number of
- *  fields will be returned (if <i>limit</i> is <code>1</code>, the entire
- *  string is returned as the only entry in an array). If negative, there is no
+ *  suppressed. If <i>limit</i> is a positive number, at most that number
+ *  of split substrings will be returned (captured groups will be returned
+ *  as well, but are not counted towards the limit).
+ *  If <i>limit</i> is <code>1</code>, the entire
+ *  string is returned as the only entry in an array. If negative, there is no
  *  limit to the number of fields returned, and trailing null fields are not
  *  suppressed.
  *
@@ -7181,6 +7231,8 @@ static const char isspacetable[256] = {
  *     "1,2,,3,4,,".split(',')         #=> ["1", "2", "", "3", "4"]
  *     "1,2,,3,4,,".split(',', 4)      #=> ["1", "2", "", "3,4,,"]
  *     "1,2,,3,4,,".split(',', -4)     #=> ["1", "2", "", "3", "4", "", ""]
+ *
+ *     "1:2:3".split(/(:)()()/, 2)     #=> ["1", ":", "", "", "2:3"]
  *
  *     "".split(',', -1)               #=> []
  */
@@ -9169,6 +9221,8 @@ str_compat_and_valid(VALUE str, rb_encoding *enc)
     return str;
 }
 
+static VALUE enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl, int cr);
+
 /**
  * @param str the string to be scrubbed
  * @param repl the replacement character
@@ -9177,18 +9231,36 @@ str_compat_and_valid(VALUE str, rb_encoding *enc)
 VALUE
 rb_str_scrub(VALUE str, VALUE repl)
 {
-    return rb_enc_str_scrub(STR_ENC_GET(str), str, repl);
+    rb_encoding *enc = STR_ENC_GET(str);
+    return enc_str_scrub(enc, str, repl, ENC_CODERANGE(str));
 }
 
 VALUE
 rb_enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl)
 {
-    int cr = ENC_CODERANGE(str);
+    int cr = ENC_CODERANGE_UNKNOWN;
+    if (enc == STR_ENC_GET(str)) {
+	/* cached coderange makes sense only when enc equals the
+	 * actual encoding of str */
+	cr = ENC_CODERANGE(str);
+    }
+    return enc_str_scrub(enc, str, repl, cr);
+}
+
+static VALUE
+enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl, int cr)
+{
     int encidx;
     VALUE buf = Qnil;
     const char *rep;
-    long replen;
+    long replen = -1;
     int tainted = 0;
+
+    if (rb_block_given_p()) {
+	if (!NIL_P(repl))
+	    rb_raise(rb_eArgError, "both of block and replacement given");
+	replen = 0;
+    }
 
     if (ENC_CODERANGE_CLEAN_P(cr))
 	return Qnil;
@@ -9213,9 +9285,8 @@ rb_enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl)
 	const char *e = RSTRING_END(str);
 	const char *p1 = p;
 	int rep7bit_p;
-	if (rb_block_given_p()) {
+	if (!replen) {
 	    rep = NULL;
-	    replen = 0;
 	    rep7bit_p = FALSE;
 	}
 	else if (!NIL_P(repl)) {
@@ -9326,7 +9397,10 @@ rb_enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl)
 	const char *e = RSTRING_END(str);
 	const char *p1 = p;
 	long mbminlen = rb_enc_mbminlen(enc);
-	if (!NIL_P(repl)) {
+	if (!replen) {
+	    rep = NULL;
+	}
+	else if (!NIL_P(repl)) {
 	    rep = RSTRING_PTR(repl);
 	    replen = RSTRING_LEN(repl);
 	}
@@ -9377,7 +9451,7 @@ rb_enc_str_scrub(rb_encoding *enc, VALUE str, VALUE repl)
 		    rb_str_buf_cat(buf, rep, replen);
 		}
 		else {
-		    repl = rb_yield(rb_enc_str_new(p, e-p, enc));
+		    repl = rb_yield(rb_enc_str_new(p, clen, enc));
 		    repl = str_compat_and_valid(repl, enc);
 		    tainted |= OBJ_TAINTED_RAW(repl);
 		    rb_str_buf_cat(buf, RSTRING_PTR(repl), RSTRING_LEN(repl));

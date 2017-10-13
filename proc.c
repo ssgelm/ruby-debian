@@ -2,7 +2,7 @@
 
   proc.c - Proc, Binding, Env
 
-  $Author: rhe $
+  $Author$
   created at: Wed Jan 17 12:13:14 2007
 
   Copyright (C) 2004-2007 Koichi Sasada
@@ -353,7 +353,7 @@ rb_binding_new(void)
  *  environment. See also the description of class +Binding+.
  *
  *     def get_binding(param)
- *       return binding
+ *       binding
  *     end
  *     b = get_binding("hello")
  *     eval("param", b)   #=> "hello"
@@ -375,7 +375,7 @@ rb_f_binding(VALUE self)
  *  reporting syntax errors.
  *
  *     def get_binding(param)
- *       return binding
+ *       binding
  *     end
  *     b = get_binding("hello")
  *     b.eval("param")   #=> "hello"
@@ -392,8 +392,9 @@ bind_eval(int argc, VALUE *argv, VALUE bindval)
 }
 
 static const VALUE *
-get_local_variable_ptr(const rb_env_t *env, ID lid)
+get_local_variable_ptr(const rb_env_t **envp, ID lid)
 {
+    const rb_env_t *env = *envp;
     do {
 	if (!VM_ENV_FLAGS(env->ep, VM_FRAME_FLAG_CFRAME)) {
 	    const rb_iseq_t *iseq = env->iseq;
@@ -403,15 +404,18 @@ get_local_variable_ptr(const rb_env_t *env, ID lid)
 
 	    for (i=0; i<iseq->body->local_table_size; i++) {
 		if (iseq->body->local_table[i] == lid) {
+		    *envp = env;
 		    return &env->env[i];
 		}
 	    }
 	}
 	else {
+	    *envp = NULL;
 	    return NULL;
 	}
     } while ((env = rb_vm_env_prev_env(env)) != NULL);
 
+    *envp = NULL;
     return NULL;
 }
 
@@ -446,7 +450,7 @@ check_local_id(VALUE bindval, volatile VALUE *pname)
  *  call-seq:
  *     binding.local_variables -> Array
  *
- *  Returns the +symbol+ names of the binding's local variables
+ *  Returns the names of the binding's local variables as symbols.
  *
  *	def foo
  *  	  a = 1
@@ -455,7 +459,7 @@ check_local_id(VALUE bindval, volatile VALUE *pname)
  *  	  end
  *  	end
  *
- *  This method is short version of the following code.
+ *  This method is the short version of the following code:
  *
  *	binding.eval("local_variables")
  *
@@ -475,7 +479,7 @@ bind_local_variables(VALUE bindval)
  *  call-seq:
  *     binding.local_variable_get(symbol) -> obj
  *
- *  Returns a +value+ of local variable +symbol+.
+ *  Returns the value of the local variable +symbol+.
  *
  *	def foo
  *  	  a = 1
@@ -483,7 +487,7 @@ bind_local_variables(VALUE bindval)
  *  	  binding.local_variable_get(:b) #=> NameError
  *  	end
  *
- *  This method is short version of the following code.
+ *  This method is the short version of the following code:
  *
  *	binding.eval("#{symbol}")
  *
@@ -494,12 +498,14 @@ bind_local_variable_get(VALUE bindval, VALUE sym)
     ID lid = check_local_id(bindval, &sym);
     const rb_binding_t *bind;
     const VALUE *ptr;
+    const rb_env_t *env;
 
     if (!lid) goto undefined;
 
     GetBindingPtr(bindval, bind);
 
-    if ((ptr = get_local_variable_ptr(VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block)), lid)) == NULL) {
+    env = VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block));
+    if ((ptr = get_local_variable_ptr(&env, lid)) == NULL) {
 	sym = ID2SYM(lid);
       undefined:
 	rb_name_err_raise("local variable `%1$s' not defined for %2$s",
@@ -520,18 +526,19 @@ bind_local_variable_get(VALUE bindval, VALUE sym)
  *  	  bind = binding
  *  	  bind.local_variable_set(:a, 2) # set existing local variable `a'
  *  	  bind.local_variable_set(:b, 3) # create new local variable `b'
- *  	                                 # `b' exists only in binding.
- *  	  p bind.local_variable_get(:a) #=> 2
- *  	  p bind.local_variable_get(:b) #=> 3
- *  	  p a #=> 2
- *  	  p b #=> NameError
+ *  	                                 # `b' exists only in binding
+ *
+ *  	  p bind.local_variable_get(:a)  #=> 2
+ *  	  p bind.local_variable_get(:b)  #=> 3
+ *  	  p a                            #=> 2
+ *  	  p b                            #=> NameError
  *  	end
  *
- *  This method is a similar behavior of the following code
+ *  This method behaves similarly to the following code:
  *
  *    binding.eval("#{symbol} = #{obj}")
  *
- *  if obj can be dumped in Ruby code.
+ *  if +obj+ can be dumped in Ruby code.
  */
 static VALUE
 bind_local_variable_set(VALUE bindval, VALUE sym, VALUE val)
@@ -545,7 +552,7 @@ bind_local_variable_set(VALUE bindval, VALUE sym, VALUE val)
 
     GetBindingPtr(bindval, bind);
     env = VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block));
-    if ((ptr = get_local_variable_ptr(env, lid)) == NULL) {
+    if ((ptr = get_local_variable_ptr(&env, lid)) == NULL) {
 	/* not found. create new env */
 	ptr = rb_binding_add_dynavars(bind, 1, &lid);
 	env = VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block));
@@ -560,7 +567,7 @@ bind_local_variable_set(VALUE bindval, VALUE sym, VALUE val)
  *  call-seq:
  *     binding.local_variable_defined?(symbol) -> obj
  *
- *  Returns a +true+ if a local variable +symbol+ exists.
+ *  Returns +true+ if a local variable +symbol+ exists.
  *
  *	def foo
  *  	  a = 1
@@ -568,7 +575,7 @@ bind_local_variable_set(VALUE bindval, VALUE sym, VALUE val)
  *  	  binding.local_variable_defined?(:b) #=> false
  *  	end
  *
- *  This method is short version of the following code.
+ *  This method is the short version of the following code:
  *
  *	binding.eval("defined?(#{symbol}) == 'local-variable'")
  *
@@ -578,11 +585,13 @@ bind_local_variable_defined_p(VALUE bindval, VALUE sym)
 {
     ID lid = check_local_id(bindval, &sym);
     const rb_binding_t *bind;
+    const rb_env_t *env;
 
     if (!lid) return Qfalse;
 
     GetBindingPtr(bindval, bind);
-    return get_local_variable_ptr(VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block)), lid) ? Qtrue : Qfalse;
+    env = VM_ENV_ENVVAL_PTR(vm_block_ep(&bind->block));
+    return get_local_variable_ptr(&env, lid) ? Qtrue : Qfalse;
 }
 
 /*
@@ -634,16 +643,47 @@ sym_proc_new(VALUE klass, VALUE sym)
     return procval;
 }
 
-VALUE
-rb_func_proc_new(rb_block_call_func_t func, VALUE val)
+struct vm_ifunc *
+rb_vm_ifunc_new(VALUE (*func)(ANYARGS), const void *data, int min_argc, int max_argc)
 {
-    return cfunc_proc_new(rb_cProc, (VALUE)IFUNC_NEW(func, val, 0), 0);
+    union {
+	struct vm_ifunc_argc argc;
+	VALUE packed;
+    } arity;
+
+    if (min_argc < UNLIMITED_ARGUMENTS ||
+#if SIZEOF_INT * 2 > SIZEOF_VALUE
+	min_argc >= (int)(1U << (SIZEOF_VALUE * CHAR_BIT) / 2) ||
+#endif
+	0) {
+	rb_raise(rb_eRangeError, "minimum argument number out of range: %d",
+		 min_argc);
+    }
+    if (max_argc < UNLIMITED_ARGUMENTS ||
+#if SIZEOF_INT * 2 > SIZEOF_VALUE
+	max_argc >= (int)(1U << (SIZEOF_VALUE * CHAR_BIT) / 2) ||
+#endif
+	0) {
+	rb_raise(rb_eRangeError, "maximum argument number out of range: %d",
+		 max_argc);
+    }
+    arity.argc.min = min_argc;
+    arity.argc.max = max_argc;
+    return IFUNC_NEW(func, data, arity.packed);
 }
 
 VALUE
-rb_func_lambda_new(rb_block_call_func_t func, VALUE val)
+rb_func_proc_new(rb_block_call_func_t func, VALUE val)
 {
-    return cfunc_proc_new(rb_cProc, (VALUE)IFUNC_NEW(func, val, 0), 1);
+    struct vm_ifunc *ifunc = rb_vm_ifunc_proc_new(func, (void *)val);
+    return cfunc_proc_new(rb_cProc, (VALUE)ifunc, 0);
+}
+
+VALUE
+rb_func_lambda_new(rb_block_call_func_t func, VALUE val, int min_argc, int max_argc)
+{
+    struct vm_ifunc *ifunc = rb_vm_ifunc_new(func, (void *)val, min_argc, max_argc);
+    return cfunc_proc_new(rb_cProc, (VALUE)ifunc, 1);
 }
 
 static const char proc_without_block[] = "tried to create Proc object without a block";
@@ -776,45 +816,42 @@ rb_block_lambda(void)
 /* CHECKME: are the argument checking semantics correct? */
 
 /*
- *  Document-method: call
  *  Document-method: []
+ *  Document-method: call
  *  Document-method: yield
  *
  *  call-seq:
  *     prc.call(params,...)   -> obj
  *     prc[params,...]        -> obj
  *     prc.(params,...)       -> obj
+ *     prc.yield(params,...)  -> obj
  *
  *  Invokes the block, setting the block's parameters to the values in
  *  <i>params</i> using something close to method calling semantics.
- *  Generates a warning if multiple values are passed to a proc that
- *  expects just one (previously this silently converted the parameters
- *  to an array).  Note that <code>prc.()</code> invokes
- *  <code>prc.call()</code> with the parameters given.  It's a syntax sugar to
- *  hide "call".
+ *  Returns the value of the last expression evaluated in the block.
  *
- *  Returns the value of the last expression evaluated in the block. See
- *  also Proc#yield.
+ *     a_proc = Proc.new {|scalar, *values| values.map {|value| value*scalar } }
+ *     a_proc.call(9, 1, 2, 3)    #=> [9, 18, 27]
+ *     a_proc[9, 1, 2, 3]         #=> [9, 18, 27]
+ *     a_proc.(9, 1, 2, 3)        #=> [9, 18, 27]
+ *     a_proc.yield(9, 1, 2, 3)   #=> [9, 18, 27]
  *
- *     a_proc = Proc.new { |scalar, *values| values.collect { |value| value*scalar } }
- *     a_proc.call(9, 1, 2, 3)   #=> [9, 18, 27]
- *     a_proc[9, 1, 2, 3]        #=> [9, 18, 27]
- *     a_proc.(9, 1, 2, 3)       #=> [9, 18, 27]
+ *  Note that <code>prc.()</code> invokes <code>prc.call()</code> with
+ *  the parameters given.  It's syntactic sugar to hide "call".
  *
  *  For procs created using <code>lambda</code> or <code>->()</code> an error
- *  is generated if the wrong number of parameters are passed to a Proc with
- *  multiple parameters.  For procs created using <code>Proc.new</code> or
- *  <code>Kernel.proc</code>, extra parameters are silently discarded.
+ *  is generated if the wrong number of parameters are passed to the proc.
+ *  For procs created using <code>Proc.new</code> or <code>Kernel.proc</code>,
+ *  extra parameters are silently discarded and missing parameters are
+ *  set to +nil+.
  *
- *     a_proc = lambda {|a,b| a}
- *     a_proc.call(1,2,3)
+ *     a_proc = proc {|a,b| [a,b] }
+ *     a_proc.call(1)   #=> [1, nil]
  *
- *  <em>produces:</em>
+ *     a_proc = lambda {|a,b| [a,b] }
+ *     a_proc.call(1)   # ArgumentError: wrong number of arguments (given 1, expected 2)
  *
- *     prog.rb:4:in `block in <main>': wrong number of arguments (given 3, expected 2) (ArgumentError)
- *     	from prog.rb:5:in `call'
- *     	from prog.rb:5:in `<main>'
- *
+ *  See also Proc#lambda?.
  */
 #if 0
 static VALUE
@@ -930,13 +967,13 @@ rb_iseq_min_max_arity(const rb_iseq_t *iseq, int *max)
 }
 
 static int
-rb_block_min_max_arity(const struct rb_block *block, int *max)
+rb_vm_block_min_max_arity(const struct rb_block *block, int *max)
 {
     switch (vm_block_type(block)) {
       case block_type_iseq:
 	return rb_iseq_min_max_arity(block->as.captured.code.iseq, max);
       case block_type_proc:
-	return rb_block_min_max_arity(vm_proc_block(block->as.proc), max);
+	return rb_vm_block_min_max_arity(vm_proc_block(block->as.proc), max);
       case block_type_ifunc:
 	{
 	    const struct vm_ifunc *ifunc = block->as.captured.code.ifunc;
@@ -944,8 +981,9 @@ rb_block_min_max_arity(const struct rb_block *block, int *max)
 		/* e.g. method(:foo).to_proc.arity */
 		return method_min_max_arity((VALUE)ifunc->data, max);
 	    }
+	    *max = ifunc->argc.max;
+	    return ifunc->argc.min;
 	}
-	/* fall through */
       case block_type_symbol:
 	break;
     }
@@ -964,7 +1002,7 @@ rb_proc_min_max_arity(VALUE self, int *max)
 {
     rb_proc_t *proc;
     GetProcPtr(self, proc);
-    return rb_block_min_max_arity(&proc->block, max);
+    return rb_vm_block_min_max_arity(&proc->block, max);
 }
 
 int
@@ -973,7 +1011,7 @@ rb_proc_arity(VALUE self)
     rb_proc_t *proc;
     int max, min;
     GetProcPtr(self, proc);
-    min = rb_block_min_max_arity(&proc->block, &max);
+    min = rb_vm_block_min_max_arity(&proc->block, &max);
     return (proc->is_lambda ? min == max : max != UNLIMITED_ARGUMENTS) ? min : -min-1;
 }
 
@@ -1013,7 +1051,7 @@ rb_block_arity(void)
     }
 
     block_setup(&block, block_handler);
-    min = rb_block_min_max_arity(&block, &max);
+    min = rb_vm_block_min_max_arity(&block, &max);
 
     switch (vm_block_type(&block)) {
       case block_handler_type_symbol:
@@ -1031,6 +1069,22 @@ rb_block_arity(void)
       default:
 	return max != UNLIMITED_ARGUMENTS ? min : -min-1;
     }
+}
+
+int
+rb_block_min_max_arity(int *max)
+{
+    rb_thread_t *th = GET_THREAD();
+    rb_control_frame_t *cfp = th->cfp;
+    VALUE block_handler = rb_vm_frame_block_handler(cfp);
+    struct rb_block block;
+
+    if (block_handler == VM_BLOCK_HANDLER_NONE) {
+	rb_raise(rb_eArgError, "no block given");
+    }
+
+    block_setup(&block, block_handler);
+    return rb_vm_block_min_max_arity(&block, max);
 }
 
 const rb_iseq_t *
@@ -1086,7 +1140,7 @@ iseq_location(const rb_iseq_t *iseq)
  *    prc.source_location  -> [String, Integer]
  *
  * Returns the Ruby source filename and line number containing this proc
- * or +nil+ if this proc was not defined in Ruby (i.e. native)
+ * or +nil+ if this proc was not defined in Ruby (i.e. native).
  */
 
 VALUE
@@ -2468,7 +2522,7 @@ rb_obj_method_location(VALUE obj, ID id)
  *    meth.source_location  -> [String, Integer]
  *
  * Returns the Ruby source filename and line number containing this method
- * or nil if this method was not defined in Ruby (i.e. native)
+ * or nil if this method was not defined in Ruby (i.e. native).
  */
 
 VALUE
@@ -2656,7 +2710,7 @@ method_super_method(VALUE method)
     const rb_method_entry_t *me;
 
     TypedData_Get_Struct(method, struct METHOD, &method_data_type, data);
-    super_class = RCLASS_SUPER(method_entry_defined_class(data->me));
+    super_class = RCLASS_SUPER(RCLASS_ORIGIN(method_entry_defined_class(data->me)));
     if (!super_class) return Qnil;
     me = (rb_method_entry_t *)rb_callable_method_entry_without_refinements(super_class, data->me->called_id);
     if (!me) return Qnil;
@@ -3125,7 +3179,7 @@ Init_Proc(void)
  *         @secret = n
  *       end
  *       def get_binding
- *         return binding()
+ *         binding
  *       end
  *     end
  *

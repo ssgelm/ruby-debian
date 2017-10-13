@@ -108,6 +108,8 @@ class Gem::Specification < Gem::BasicSpecification
 
   private_constant :LOAD_CACHE if defined? private_constant
 
+  VALID_NAME_PATTERN = /\A[a-zA-Z0-9\.\-\_]+\z/ # :nodoc:
+
   # :startdoc:
 
   ##
@@ -1128,6 +1130,9 @@ class Gem::Specification < Gem::BasicSpecification
     native = {}
 
     specs.reverse_each do |spec|
+      unless spec
+        raise Gem::Exception, "unexpectedly spec is nil: #{specs}"
+      end
       next if spec.version.prerelease? unless prerelease
 
       native[spec.name] = spec.version if spec.platform == Gem::Platform::RUBY
@@ -2102,7 +2107,7 @@ class Gem::Specification < Gem::BasicSpecification
     if $DEBUG
       super
     else
-      "#<#{self.class}:0x#{__id__.to_s(16)} #{full_name}>"
+      "#{super[0..-2]} #{full_name}>"
     end
   end
 
@@ -2668,9 +2673,15 @@ class Gem::Specification < Gem::BasicSpecification
       end
     end
 
-    unless String === name then
+    if !name.is_a?(String) then
       raise Gem::InvalidSpecificationException,
-            "invalid value for attribute name: \"#{name.inspect}\""
+            "invalid value for attribute name: \"#{name.inspect}\" must be a string"
+    elsif name !~ /[a-zA-Z]/ then
+      raise Gem::InvalidSpecificationException,
+            "invalid value for attribute name: #{name.dump} must include at least one letter"
+    elsif name !~ VALID_NAME_PATTERN then
+      raise Gem::InvalidSpecificationException,
+            "invalid value for attribute name: #{name.dump} can only include letters, numbers, dashes, and underscores"
     end
 
     if raw_require_paths.empty? then
