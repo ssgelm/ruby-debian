@@ -2,7 +2,7 @@
 
   thread.c -
 
-  $Author: rhe $
+  $Author$
 
   Copyright (C) 2004-2007 Koichi Sasada
 
@@ -85,6 +85,7 @@ static ID id_locals;
 static void sleep_timeval(rb_thread_t *th, struct timeval time, int spurious_check);
 static void sleep_wait_for_interrupt(rb_thread_t *th, double sleepsec, int spurious_check);
 static void sleep_forever(rb_thread_t *th, int nodeadlock, int spurious_check);
+static void rb_thread_sleep_deadly_allow_spurious_wakeup(void);
 static double timeofday(void);
 static int rb_threadptr_dead(rb_thread_t *th);
 static void rb_check_deadlock(rb_vm_t *vm);
@@ -94,7 +95,11 @@ static int rb_threadptr_pending_interrupt_empty_p(rb_thread_t *th);
 #define eTerminateSignal INT2FIX(1)
 static volatile int system_working = 1;
 
-#define closed_stream_error GET_VM()->special_exceptions[ruby_error_closed_stream]
+struct waiting_fd {
+    struct list_node wfd_node; /* <=> vm.waiting_fds */
+    rb_thread_t *th;
+    int fd;
+};
 
 inline static void
 st_delete_wrap(st_table *table, st_data_t key)
@@ -549,12 +554,45 @@ ruby_thread_init_stack(rb_thread_t *th)
     native_thread_init_stack(th);
 }
 
+const VALUE *
+rb_vm_proc_local_ep(VALUE proc)
+{
+    const VALUE *ep = vm_proc_ep(proc);
+
+    if (ep) {
+	return rb_vm_ep_local_ep(ep);
+    }
+    else {
+	return NULL;
+    }
+}
+
+static void
+thread_do_start(rb_thread_t *th, VALUE args)
+{
+    native_set_thread_name(th);
+    if (!th->first_func) {
+	rb_proc_t *proc;
+	GetProcPtr(th->first_proc, proc);
+	th->errinfo = Qnil;
+	th->root_lep = rb_vm_proc_local_ep(th->first_proc);
+	th->root_svar = Qfalse;
+	EXEC_EVENT_HOOK(th, RUBY_EVENT_THREAD_BEGIN, th->self, 0, 0, 0, Qundef);
+	th->value = rb_vm_invoke_proc(th, proc,
+				      (int)RARRAY_LEN(args), RARRAY_CONST_PTR(args),
+				      VM_BLOCK_HANDLER_NONE);
+	EXEC_EVENT_HOOK(th, RUBY_EVENT_THREAD_END, th->self, 0, 0, 0, Qundef);
+    }
+    else {
+	th->value = (*th->first_func)((void *)args);
+    }
+}
+
 static int
 thread_start_func_2(rb_thread_t *th, VALUE *stack_start, VALUE *register_stack_start)
 {
     int state;
     VALUE args = th->first_args;
-    rb_proc_t *proc;
     rb_thread_list_t *join_list;
     rb_thread_t *main_th;
     VALUE errinfo = Qnil;
@@ -582,23 +620,7 @@ thread_start_func_2(rb_thread_t *th, VALUE *stack_start, VALUE *register_stack_s
 
 	TH_PUSH_TAG(th);
 	if ((state = EXEC_TAG()) == 0) {
-	    SAVE_ROOT_JMPBUF(th, {
-                native_set_thread_name(th);
-		if (!th->first_func) {
-		    GetProcPtr(th->first_proc, proc);
-		    th->errinfo = Qnil;
-		    th->root_lep = rb_vm_ep_local_ep(vm_proc_ep(th->first_proc));
-		    th->root_svar = Qfalse;
-		    EXEC_EVENT_HOOK(th, RUBY_EVENT_THREAD_BEGIN, th->self, 0, 0, 0, Qundef);
-		    th->value = rb_vm_invoke_proc(th, proc,
-						  (int)RARRAY_LEN(args), RARRAY_CONST_PTR(args),
-						  VM_BLOCK_HANDLER_NONE);
-		    EXEC_EVENT_HOOK(th, RUBY_EVENT_THREAD_END, th->self, 0, 0, 0, Qundef);
-		}
-		else {
-		    th->value = (*th->first_func)((void *)args);
-		}
-	    });
+	    SAVE_ROOT_JMPBUF(th, thread_do_start(th, args));
 	}
 	else {
 	    errinfo = th->errinfo;
@@ -666,10 +688,8 @@ thread_start_func_2(rb_thread_t *th, VALUE *stack_start, VALUE *register_stack_s
 	rb_threadptr_unlock_all_locking_mutexes(th);
 	rb_check_deadlock(th->vm);
 
-	if (!th->root_fiber) {
-	    rb_thread_recycle_stack_release(th->stack);
-	    th->stack = 0;
-	}
+	rb_thread_recycle_stack_release(th->stack);
+	th->stack = NULL;
     }
     native_mutex_lock(&th->vm->thread_destruct_lock);
     /* make sure vm->running_thread never point me after this point.*/
@@ -845,7 +865,7 @@ thread_join_sleep(VALUE arg)
 
     while (target_th->status != THREAD_KILLED) {
 	if (forever) {
-	    sleep_forever(th, 1, 0);
+	    sleep_forever(th, TRUE, FALSE);
 	}
 	else {
 	    double now = timeofday();
@@ -1136,14 +1156,21 @@ void
 rb_thread_sleep_forever(void)
 {
     thread_debug("rb_thread_sleep_forever\n");
-    sleep_forever(GET_THREAD(), 0, 1);
+    sleep_forever(GET_THREAD(), FALSE, TRUE);
 }
 
 void
 rb_thread_sleep_deadly(void)
 {
     thread_debug("rb_thread_sleep_deadly\n");
-    sleep_forever(GET_THREAD(), 1, 1);
+    sleep_forever(GET_THREAD(), TRUE, TRUE);
+}
+
+static void
+rb_thread_sleep_deadly_allow_spurious_wakeup(void)
+{
+    thread_debug("rb_thread_sleep_deadly_allow_spurious_wakeup\n");
+    sleep_forever(GET_THREAD(), TRUE, FALSE);
 }
 
 static double
@@ -1285,7 +1312,6 @@ call_without_gvl(void *(*func)(void *), void *data1,
     rb_thread_t *th = GET_THREAD();
     int saved_errno = 0;
 
-    th->waiting_fd = -1;
     if (ubf == RUBY_UBF_IO || ubf == RUBY_UBF_PROCESS) {
 	ubf = ubf_select;
 	data2 = th;
@@ -1408,11 +1434,15 @@ VALUE
 rb_thread_io_blocking_region(rb_blocking_function_t *func, void *data1, int fd)
 {
     volatile VALUE val = Qundef; /* shouldn't be used */
+    rb_vm_t *vm = GET_VM();
     rb_thread_t *th = GET_THREAD();
     volatile int saved_errno = 0;
     int state;
+    struct waiting_fd wfd;
 
-    th->waiting_fd = fd;
+    wfd.fd = fd;
+    wfd.th = th;
+    list_add(&vm->waiting_fds, &wfd.wfd_node);
 
     TH_PUSH_TAG(th);
     if ((state = EXEC_TAG()) == 0) {
@@ -1423,8 +1453,8 @@ rb_thread_io_blocking_region(rb_blocking_function_t *func, void *data1, int fd)
     }
     TH_POP_TAG();
 
-    /* clear waiting_fd anytime */
-    th->waiting_fd = -1;
+    /* must be deleted before jump */
+    list_del(&wfd.wfd_node);
 
     if (state) {
 	TH_JUMP_TAG(th, state);
@@ -2095,6 +2125,13 @@ rb_threadptr_raise(rb_thread_t *th, int argc, VALUE *argv)
     else {
 	exc = rb_make_exception(argc, argv);
     }
+
+    /* making an exception object can switch thread,
+       so we need to check thread deadness again */
+    if (rb_threadptr_dead(th)) {
+	return Qnil;
+    }
+
     rb_threadptr_setup_exception(GET_THREAD(), exc, Qundef);
     rb_threadptr_pending_interrupt_enque(th, exc);
     rb_threadptr_interrupt(th);
@@ -2159,19 +2196,36 @@ rb_threadptr_reset_raised(rb_thread_t *th)
     return 1;
 }
 
-void
-rb_thread_fd_close(int fd)
+int
+rb_notify_fd_close(int fd)
 {
     rb_vm_t *vm = GET_THREAD()->vm;
-    rb_thread_t *th = 0;
+    struct waiting_fd *wfd = 0;
+    int busy;
 
-    list_for_each(&vm->living_threads, th, vmlt_node) {
-	if (th->waiting_fd == fd) {
-	    VALUE err = th->vm->special_exceptions[ruby_error_closed_stream];
+    busy = 0;
+    list_for_each(&vm->waiting_fds, wfd, wfd_node) {
+	if (wfd->fd == fd) {
+	    rb_thread_t *th = wfd->th;
+	    VALUE err;
+
+	    busy = 1;
+	    if (!th) {
+		continue;
+	    }
+	    wfd->th = 0;
+	    err = th->vm->special_exceptions[ruby_error_stream_closed];
 	    rb_threadptr_pending_interrupt_enque(th, err);
 	    rb_threadptr_interrupt(th);
 	}
     }
+    return busy;
+}
+
+void
+rb_thread_fd_close(int fd)
+{
+    while (rb_notify_fd_close(fd)) rb_thread_schedule();
 }
 
 /*
@@ -4797,7 +4851,7 @@ Init_Thread(void)
     rb_define_method(rb_cThread, "name=", rb_thread_setname, 1);
     rb_define_method(rb_cThread, "inspect", rb_thread_inspect, 0);
 
-    rb_vm_register_special_exception(ruby_error_closed_stream, rb_eIOError, "stream closed");
+    rb_vm_register_special_exception(ruby_error_stream_closed, rb_eIOError, "stream closed");
 
     cThGroup = rb_define_class("ThreadGroup", rb_cObject);
     rb_define_alloc_func(cThGroup, thgroup_s_alloc);

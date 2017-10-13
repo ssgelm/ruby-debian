@@ -65,17 +65,19 @@ static const struct {
     { #name"_server", (SSL_METHOD *(*)(void))name##_server_method, version }, \
     { #name"_client", (SSL_METHOD *(*)(void))name##_client_method, version }
 #endif
-#if defined(HAVE_SSLV2_METHOD)
+#if !defined(OPENSSL_NO_SSL2) && !defined(OPENSSL_NO_SSL2_METHOD) && defined(HAVE_SSLV2_METHOD)
     OSSL_SSL_METHOD_ENTRY(SSLv2, SSL2_VERSION),
 #endif
-#if defined(HAVE_SSLV3_METHOD)
+#if !defined(OPENSSL_NO_SSL3) && !defined(OPENSSL_NO_SSL3_METHOD) && defined(HAVE_SSLV3_METHOD)
     OSSL_SSL_METHOD_ENTRY(SSLv3, SSL3_VERSION),
 #endif
+#if !defined(OPENSSL_NO_TLS1) && !defined(OPENSSL_NO_TLS1_METHOD)
     OSSL_SSL_METHOD_ENTRY(TLSv1, TLS1_VERSION),
-#if defined(HAVE_TLSV1_1_METHOD)
+#endif
+#if !defined(OPENSSL_NO_TLS1_1) && !defined(OPENSSL_NO_TLS1_1_METHOD) && defined(HAVE_TLSV1_1_METHOD)
     OSSL_SSL_METHOD_ENTRY(TLSv1_1, TLS1_1_VERSION),
 #endif
-#if defined(HAVE_TLSV1_2_METHOD)
+#if !defined(OPENSSL_NO_TLS1_2) && !defined(OPENSSL_NO_TLS1_2_METHOD) && defined(HAVE_TLSV1_2_METHOD)
     OSSL_SSL_METHOD_ENTRY(TLSv1_2, TLS1_2_VERSION),
 #endif
     OSSL_SSL_METHOD_ENTRY(SSLv23, 0),
@@ -1483,7 +1485,8 @@ ossl_ssl_setup(VALUE self)
     GetOpenFile(io, fptr);
     rb_io_check_readable(fptr);
     rb_io_check_writable(fptr);
-    SSL_set_fd(ssl, TO_SOCKET(FPTR_TO_FD(fptr)));
+    if (!SSL_set_fd(ssl, TO_SOCKET(FPTR_TO_FD(fptr))))
+	ossl_raise(eSSLError, "SSL_set_fd");
 
     return Qtrue;
 }
@@ -1598,10 +1601,10 @@ ossl_ssl_connect(VALUE self)
  *     retry
  *   end
  *
- * By specifying `exception: false`, the options hash allows you to indicate
+ * By specifying a keyword argument _exception_ to +false+, you can indicate
  * that connect_nonblock should not raise an IO::WaitReadable or
- * IO::WaitWritable exception, but return the symbol :wait_readable or
- * :wait_writable instead.
+ * IO::WaitWritable exception, but return the symbol +:wait_readable+ or
+ * +:wait_writable+ instead.
  */
 static VALUE
 ossl_ssl_connect_nonblock(int argc, VALUE *argv, VALUE self)
@@ -1646,10 +1649,10 @@ ossl_ssl_accept(VALUE self)
  *     retry
  *   end
  *
- * By specifying `exception: false`, the options hash allows you to indicate
+ * By specifying a keyword argument _exception_ to +false+, you can indicate
  * that accept_nonblock should not raise an IO::WaitReadable or
- * IO::WaitWritable exception, but return the symbol :wait_readable or
- * :wait_writable instead.
+ * IO::WaitWritable exception, but return the symbol +:wait_readable+ or
+ * +:wait_writable+ instead.
  */
 static VALUE
 ossl_ssl_accept_nonblock(int argc, VALUE *argv, VALUE self)
