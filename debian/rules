@@ -28,6 +28,7 @@ configure_options += --disable-rpath
 configure_options += --with-baseruby=$(baseruby)
 configure_options += --with-sitedir='/usr/local/lib/site_ruby'
 configure_options += --with-sitearchdir="/usr/local/lib/$(DEB_HOST_MULTIARCH)/site_ruby"
+configure_options += --enable-install-static-library
 
 # the following are ignored by ./configure, but used by some extconf.rb scripts
 configure_options += --enable-ipv6
@@ -77,7 +78,7 @@ override_dh_auto_install-arch:
 	$(RM) $(CURDIR)/debian/tmp/usr/lib/ruby/$(RUBY_API_VERSION)/rdoc/generator/template/darkfish/fonts/Lato-LightItalic.ttf
 	dh_link -plibruby$(RUBY_VERSION) /usr/share/fonts/truetype/lato/Lato-LightItalic.ttf /usr/lib/ruby/$(RUBY_API_VERSION)/rdoc/generator/template/darkfish/fonts/Lato-LightItalic.ttf
 	# remove embedded SSL certificates (replaced using ca-certificates via rubygems-integration)
-	$(RM) $(CURDIR)/debian/tmp/usr/lib/ruby/$(RUBY_API_VERSION)/rubygems/ssl_certs/*
+	$(RM) -r $(CURDIR)/debian/tmp/usr/lib/ruby/$(RUBY_API_VERSION)/rubygems/ssl_certs/*
 	# ship rubygems system install directory
 	mkdir -p $(CURDIR)/debian/tmp/var/lib/gems/$(RUBY_API_VERSION)
 	# sanity check
