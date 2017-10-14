@@ -1,7 +1,0 @@
-configure-in.patch
-#io-console-date.patch
-bigdecimal-date.patch
-mkmf.patch
-rdoc-json-generator.patch
-debian-changes
-configure-2.4.2.diff
